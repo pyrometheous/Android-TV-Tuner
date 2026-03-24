@@ -4,7 +4,6 @@ import androidx.navigation.NavController
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
 import dev.tvtuner.feature.guide.GuideScreen
-import dev.tvtuner.feature.livetv.navigation.ROUTE_LIVE_TV
 
 const val ROUTE_GUIDE = "guide"
 
@@ -13,7 +12,7 @@ fun NavGraphBuilder.guideScreen(navController: NavController) {
         GuideScreen(
             onBack = { navController.popBackStack() },
             onTuneToChannel = {
-                navController.navigate(ROUTE_LIVE_TV) {
+                navController.navigate("live_tv") {
                     launchSingleTop = true
                 }
             },

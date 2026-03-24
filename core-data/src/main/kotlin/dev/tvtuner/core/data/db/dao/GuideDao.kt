@@ -13,7 +13,7 @@ interface GuideDao {
     @Query(
         """SELECT * FROM guide_entries
            WHERE channel_id = :channelId
-             AND end_time_ms > :nowMs
+             AND (start_time_ms + duration_ms) > :nowMs
            ORDER BY start_time_ms ASC"""
     )
     fun observeUpcomingForChannel(channelId: Long, nowMs: Long): Flow<List<GuideEntryEntity>>
@@ -21,7 +21,7 @@ interface GuideDao {
     @Query(
         """SELECT * FROM guide_entries
            WHERE channel_id IN (:channelIds)
-             AND end_time_ms > :fromMs
+             AND (start_time_ms + duration_ms) > :fromMs
              AND start_time_ms < :toMs
            ORDER BY channel_id ASC, start_time_ms ASC"""
     )
@@ -35,7 +35,7 @@ interface GuideDao {
         """SELECT * FROM guide_entries
            WHERE channel_id = :channelId
              AND start_time_ms <= :nowMs
-             AND end_time_ms > :nowMs
+             AND (start_time_ms + duration_ms) > :nowMs
            LIMIT 1"""
     )
     suspend fun getCurrentProgram(channelId: Long, nowMs: Long): GuideEntryEntity?
@@ -46,6 +46,6 @@ interface GuideDao {
     @Query("DELETE FROM guide_entries WHERE channel_id = :channelId")
     suspend fun deleteForChannel(channelId: Long)
 
-    @Query("DELETE FROM guide_entries WHERE end_time_ms < :beforeMs")
+    @Query("DELETE FROM guide_entries WHERE (start_time_ms + duration_ms) < :beforeMs")
     suspend fun deleteExpired(beforeMs: Long)
 }

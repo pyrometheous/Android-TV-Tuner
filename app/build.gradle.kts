@@ -87,6 +87,7 @@ dependencies {
     implementation(libs.datastore.preferences)
 
     ksp(libs.hilt.compiler)
+    ksp(libs.hilt.work.compiler)
     ksp(libs.room.compiler)
     ksp(libs.hilt.work.compiler)
 

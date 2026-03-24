@@ -252,9 +252,10 @@ private fun ProgramCell(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (!program.subtitle.isNullOrBlank()) {
+            val subtitle = program.subtitle
+            if (!subtitle.isNullOrBlank()) {
                 Text(
-                    text = program.subtitle,
+                    text = subtitle,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
                     maxLines = 1,

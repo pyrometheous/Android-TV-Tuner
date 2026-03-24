@@ -25,6 +25,7 @@ dependencies {
     implementation(project(":core-ui"))
     implementation(project(":core-data"))
     implementation(project(":tuner-core"))
+    implementation(project(":tuner-network"))
     implementation(project(":parser-atsc-psip"))
 
     implementation(libs.androidx.core.ktx)

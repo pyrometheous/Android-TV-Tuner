@@ -176,9 +176,10 @@ private fun RecordingCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (!recording.subtitle.isNullOrBlank()) {
+                    val subtitle = recording.subtitle
+                    if (!subtitle.isNullOrBlank()) {
                         Text(
-                            text = recording.subtitle,
+                            text = subtitle,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
