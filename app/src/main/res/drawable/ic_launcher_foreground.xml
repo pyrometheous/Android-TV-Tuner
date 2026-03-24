@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TV antenna / broadcast icon for the TV Tuner app launcher -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer circle background -->
+    <path
+        android:fillColor="#1E88E5"
+        android:pathData="M54,54m-46,0a46,46 0,1 1,92 0a46,46 0,1 1,-92 0" />
+
+    <!-- TV screen body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M26,40 Q26,36 30,36 L78,36 Q82,36 82,40 L82,68 Q82,72 78,72 L30,72 Q26,72 26,68 Z" />
+
+    <!-- TV screen inner (picture) -->
+    <path
+        android:fillColor="#1565C0"
+        android:pathData="M30,42 Q30,40 32,40 L76,40 Q78,40 78,42 L78,66 Q78,68 76,68 L32,68 Q30,68 30,66 Z" />
+
+    <!-- Antenna left arm -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M44,36 L36,22"
+        android:strokeWidth="3"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round" />
+
+    <!-- Antenna right arm -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M64,36 L72,22"
+        android:strokeWidth="3"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round" />
+
+    <!-- Signal dot left antenna top -->
+    <path
+        android:fillColor="#E3F2FD"
+        android:pathData="M35,22m-2.5,0a2.5,2.5 0,1 1,5 0a2.5,2.5 0,1 1,-5 0" />
+
+    <!-- Signal dot right antenna top -->
+    <path
+        android:fillColor="#E3F2FD"
+        android:pathData="M73,22m-2.5,0a2.5,2.5 0,1 1,5 0a2.5,2.5 0,1 1,-5 0" />
+
+    <!-- Stand / base -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M47,72 L44,80 L64,80 L61,72 Z" />
+
+    <!-- Base foot -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,80 Q40,78 44,78 L64,78 Q68,78 68,80 L68,82 Q68,84 64,84 L44,84 Q40,84 40,82 Z" />
+
+    <!-- OTA signal arc 1 (innermost) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#90CAF9"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M40,55 A8,8 0,0,1 54,47" />
+
+    <!-- OTA signal arc 2 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#90CAF9"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M36,59 A14,14 0,0,1 54,45" />
+
+</vector>

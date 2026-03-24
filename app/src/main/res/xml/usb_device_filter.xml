@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    USB device filter for MyGica PT682C / PadTV HD USB-C ATSC tuner family.
+
+    IMPORTANT: The actual Vendor ID (VID) and Product ID (PID) values below are
+    PLACEHOLDERS. Real VID/PID values must be obtained from:
+      - USB device inspection (adb shell lsusb or UsbManager enumeration)
+      - MyGica vendor documentation or SDK
+      - Reverse engineering the PadTV HD app's USB filter
+    See DEVELOPMENT_STATUS.md §USB Hardware Integration for details.
+-->
+<resources>
+    <!--
+        MyGica PT682C family — VID 0x1f4d (PLACEHOLDER, verify with lsusb)
+        Common chip vendors for this family: Afatech AF9035, ITE IT9303
+    -->
+    <usb-device vendor-id="0x1f4d" />
+    <!-- Afatech AF9035 chipset -->
+    <usb-device vendor-id="0x15a4" />
+    <!-- ITE Technologies -->
+    <usb-device vendor-id="0x048d" />
+    <!-- Generic placeholder for any attached USB tuner — refine after real USB sniff -->
+    <usb-device class="0xff" subclass="0xff" protocol="0xff" />
+</resources>
