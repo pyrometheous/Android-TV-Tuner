@@ -105,10 +105,14 @@ class MyGicaUsbTunerBackend @Inject constructor(
                     }
                 }
 
-                // minSdk = 33, always use FLAG_MUTABLE (API 31+)
+                // Android 14+ disallows mutable PendingIntent with implicit intents.
+                // Use an app-package explicit intent plus FLAG_IMMUTABLE.
+                val permissionIntent = Intent(ACTION_USB_PERMISSION).setPackage(context.packageName)
                 val permIntent = PendingIntent.getBroadcast(
-                    context, 0, Intent(ACTION_USB_PERMISSION),
-                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                    context,
+                    0,
+                    permissionIntent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                 )
 
                 try {
