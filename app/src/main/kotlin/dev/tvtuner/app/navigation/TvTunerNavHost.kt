@@ -7,16 +7,15 @@ import dev.tvtuner.feature.guide.navigation.guideScreen
 import dev.tvtuner.feature.livetv.navigation.liveTvScreen
 import dev.tvtuner.feature.recordings.navigation.recordingsGraph
 import dev.tvtuner.feature.settings.navigation.settingsScreen
+import dev.tvtuner.app.navigation.onboarding.ROUTE_ONBOARDING_GRAPH
 import dev.tvtuner.app.navigation.onboarding.onboardingGraph
-
-const val ROUTE_HOME = "home"
 
 @Composable
 fun TvTunerNavHost() {
     val navController = rememberNavController()
     NavHost(
         navController = navController,
-        startDestination = ROUTE_HOME,
+        startDestination = ROUTE_ONBOARDING_GRAPH,
     ) {
         onboardingGraph(navController)
         liveTvScreen(navController)

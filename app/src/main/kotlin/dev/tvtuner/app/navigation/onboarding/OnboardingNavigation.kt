@@ -4,7 +4,6 @@ import androidx.navigation.NavController
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
 import androidx.navigation.navigation
-import dev.tvtuner.app.navigation.ROUTE_HOME
 import dev.tvtuner.feature.livetv.navigation.ROUTE_LIVE_TV
 import dev.tvtuner.feature.settings.onboarding.OnboardingScreen
 
