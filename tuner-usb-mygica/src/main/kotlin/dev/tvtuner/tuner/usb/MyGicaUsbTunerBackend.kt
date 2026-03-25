@@ -7,7 +7,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
-import android.os.Build
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.tvtuner.tuner.core.ScanEvent
@@ -19,10 +18,9 @@ import dev.tvtuner.tuner.core.TunerBackendType
 import dev.tvtuner.tuner.core.TunerDevice
 import dev.tvtuner.tuner.core.TunerError
 import dev.tvtuner.tuner.core.TunerResult
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import javax.inject.Inject
 import kotlin.coroutines.resume
@@ -91,38 +89,48 @@ class MyGicaUsbTunerBackend @Inject constructor(
             return TunerResult.Success(Unit)
         }
 
-        return suspendCancellableCoroutine { cont ->
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(ctx: Context, intent: Intent) {
-                    if (intent.action == ACTION_USB_PERMISSION) {
-                        val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                        context.unregisterReceiver(this)
-                        if (granted) {
-                            cont.resume(TunerResult.Success(Unit))
-                        } else {
-                            cont.resume(TunerResult.Failure(TunerError.PermissionDenied("USB permission denied by user")))
+        return try {
+            suspendCancellableCoroutine { cont ->
+                val receiver = object : BroadcastReceiver() {
+                    override fun onReceive(ctx: Context, intent: Intent) {
+                        if (intent.action == ACTION_USB_PERMISSION) {
+                            val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                            try { context.unregisterReceiver(this) } catch (_: Exception) {}
+                            if (granted) {
+                                cont.resume(TunerResult.Success(Unit))
+                            } else {
+                                cont.resume(TunerResult.Failure(TunerError.PermissionDenied("USB permission denied by user")))
+                            }
                         }
                     }
                 }
-            }
 
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            } else {
-                PendingIntent.FLAG_UPDATE_CURRENT
-            }
-            val permIntent = PendingIntent.getBroadcast(context, 0, Intent(ACTION_USB_PERMISSION), flags)
+                // minSdk = 33, always use FLAG_MUTABLE (API 31+)
+                val permIntent = PendingIntent.getBroadcast(
+                    context, 0, Intent(ACTION_USB_PERMISSION),
+                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                )
 
-            context.registerReceiver(
-                receiver,
-                IntentFilter(ACTION_USB_PERMISSION),
-                Context.RECEIVER_NOT_EXPORTED,
-            )
-            usbManager.requestPermission(usbDevice, permIntent)
+                try {
+                    context.registerReceiver(
+                        receiver,
+                        IntentFilter(ACTION_USB_PERMISSION),
+                        Context.RECEIVER_NOT_EXPORTED,
+                    )
+                    usbManager.requestPermission(usbDevice, permIntent)
+                } catch (e: Exception) {
+                    Log.e(TAG, "requestPermission: setup failed — ${e.message}")
+                    try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
+                    cont.resumeWith(Result.failure(e))
+                }
 
-            cont.invokeOnCancellation {
-                try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
+                cont.invokeOnCancellation {
+                    try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
+                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "requestPermission: failed", e)
+            TunerResult.Failure(TunerError.DeviceOpenFailed("USB permission request failed: ${e.message}", e))
         }
     }
 
@@ -158,13 +166,13 @@ class MyGicaUsbTunerBackend @Inject constructor(
         return emptyFlow()
     }
 
-    override fun scanChannels(mode: ScanMode): Flow<ScanEvent> = callbackFlow {
+    override fun scanChannels(mode: ScanMode): Flow<ScanEvent> = flow {
         // TODO: Iterate ATSC broadcast frequencies (57–803 MHz in 6 MHz steps for US)
         // TODO: Tune to each, wait for lock, if locked — read PAT/PMT/MGT/VCT tables
         // TODO: Emit ScanEvent.ChannelFound for each discovered service
         Log.w(TAG, "scanChannels: NOT IMPLEMENTED — vendor protocol required")
-        send(ScanEvent.Error(TunerError.NotImplemented()))
-        awaitClose()
+        emit(ScanEvent.Error(TunerError.NotImplemented()))
+        // Flow terminates here; ScanViewModel can retry cleanly
     }
 
     override suspend fun getSignalMetrics(): SignalMetrics {

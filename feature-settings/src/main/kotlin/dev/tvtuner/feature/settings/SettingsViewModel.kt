@@ -8,6 +8,7 @@ import dev.tvtuner.core.data.repository.ChannelRepository
 import dev.tvtuner.tuner.core.TunerDevice
 import dev.tvtuner.tuner.core.TunerManager
 import dev.tvtuner.tuner.core.TunerState
+import dev.tvtuner.tuner.core.TunerResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +42,9 @@ class SettingsViewModel @Inject constructor(
     val tunerState: StateFlow<TunerState> = tunerManager.state
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), TunerState.Idle)
 
+    private val _selectError = MutableStateFlow<String?>(null)
+    val selectError: StateFlow<String?> = _selectError.asStateFlow()
+
     fun scanForNetworkTuners() {
         viewModelScope.launch {
             _isScanning.value = true
@@ -50,7 +54,17 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun selectDevice(device: TunerDevice) {
-        viewModelScope.launch { tunerManager.select(device) }
+        viewModelScope.launch {
+            _selectError.value = null
+            val result = tunerManager.select(device)
+            if (result is TunerResult.Failure) {
+                _selectError.value = result.error.message
+            }
+        }
+    }
+
+    fun clearSelectError() {
+        _selectError.value = null
     }
 
     fun selectTunerBackend(backend: String) {

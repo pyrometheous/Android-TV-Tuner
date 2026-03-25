@@ -46,17 +46,27 @@ class TunerManager @Inject constructor(
         val backend = backends.firstOrNull { it.backendName == device.backendType.name }
             ?: return TunerResult.Failure(TunerError.DeviceNotFound("No backend for ${device.backendType}"))
 
-        val permResult = backend.requestPermission(device)
-        if (permResult is TunerResult.Failure) return permResult
+        return try {
+            val permResult = backend.requestPermission(device)
+            if (permResult is TunerResult.Failure) return permResult
 
-        val openResult = backend.openTuner(device)
-        if (openResult is TunerResult.Failure) return openResult
+            val openResult = backend.openTuner(device)
+            if (openResult is TunerResult.Failure) {
+                _state.value = TunerState.Error(openResult.error)
+                return openResult
+            }
 
-        activeBackend = backend
-        activeDevice = device
-        _state.value = TunerState.Ready(device)
-        Log.i(TAG, "Tuner selected: ${device.displayName} via ${backend.backendName}")
-        return TunerResult.Success(Unit)
+            activeBackend = backend
+            activeDevice = device
+            _state.value = TunerState.Ready(device)
+            Log.i(TAG, "Tuner selected: ${device.displayName} via ${backend.backendName}")
+            TunerResult.Success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "select() failed unexpectedly", e)
+            val error = TunerError.Unknown(e.message ?: "Unexpected error during device selection", e)
+            _state.value = TunerState.Error(error)
+            TunerResult.Failure(error)
+        }
     }
 
     suspend fun tune(request: TuneRequest): TunerResult<Unit> {

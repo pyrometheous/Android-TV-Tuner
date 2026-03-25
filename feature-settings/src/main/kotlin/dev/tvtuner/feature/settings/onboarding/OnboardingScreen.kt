@@ -57,6 +57,7 @@ fun OnboardingScreen(
     val discovered by settingsViewModel.discoveredTuners.collectAsStateWithLifecycle()
     val isScanning by settingsViewModel.isScanning.collectAsStateWithLifecycle()
     val tunerState by settingsViewModel.tunerState.collectAsStateWithLifecycle()
+    val selectError by settingsViewModel.selectError.collectAsStateWithLifecycle()
     val scanState by scanViewModel.uiState.collectAsStateWithLifecycle()
 
     val selectedDeviceId: String? = when (val ts = tunerState) {
@@ -89,8 +90,12 @@ fun OnboardingScreen(
                         discovered = discovered,
                         isScanning = isScanning,
                         selectedDeviceId = selectedDeviceId,
+                        selectError = selectError,
                         onScan = { settingsViewModel.scanForNetworkTuners() },
-                        onSelect = { settingsViewModel.selectDevice(it) },
+                        onSelect = {
+                            settingsViewModel.clearSelectError()
+                            settingsViewModel.selectDevice(it)
+                        },
                     )
                     STEP_SCAN -> ChannelScanStep(
                         scanState = scanState,
@@ -172,6 +177,7 @@ private fun TunerStep(
     discovered: List<dev.tvtuner.tuner.core.TunerDevice>,
     isScanning: Boolean,
     selectedDeviceId: String?,
+    selectError: String?,
     onScan: () -> Unit,
     onSelect: (dev.tvtuner.tuner.core.TunerDevice) -> Unit,
 ) {
@@ -232,6 +238,14 @@ private fun TunerStep(
                 "No tuner found yet. You can still proceed and add one later in Settings.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
+        if (selectError != null) {
+            Text(
+                "Could not select tuner: $selectError",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
                 textAlign = TextAlign.Center,
             )
         }
