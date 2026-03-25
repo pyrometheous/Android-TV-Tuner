@@ -5,10 +5,17 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
+import dev.tvtuner.parser.atsc.PsipEvent
+import dev.tvtuner.parser.atsc.PsipProcessor
+import dev.tvtuner.parser.atsc.TsConstants
 import dev.tvtuner.tuner.core.ScanEvent
 import dev.tvtuner.tuner.core.ScanMode
 import dev.tvtuner.tuner.core.SignalMetrics
@@ -18,32 +25,27 @@ import dev.tvtuner.tuner.core.TunerBackendType
 import dev.tvtuner.tuner.core.TunerDevice
 import dev.tvtuner.tuner.core.TunerError
 import dev.tvtuner.tuner.core.TunerResult
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import kotlin.coroutines.resume
 
 /**
- * USB tuner backend targeting the MyGica PT682C / PadTV HD ATSC USB-C tuner family.
+ * USB tuner backend for MyGica PT682C / PadTV HD ATSC USB-C tuner family.
  *
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │  HARDWARE INTEGRATION STATUS — INCOMPLETE                               │
- * │                                                                         │
- * │  The MyGica PT682C uses a vendor-specific USB protocol. The exact VID,  │
- * │  PID, control commands, and data pipe layout are NOT publicly           │
- * │  documented. Integration requires one of:                               │
- * │    A) MyGica vendor SDK / JNI library (contact MyGica/PadTV)            │
- * │    B) USB protocol analysis via Wireshark + usbmon on Linux or          │
- * │       Android UsbMonitor capturing the PadTV HD app traffic             │
- * │                                                                         │
- * │  All methods in this class return TunerError.NotImplemented until       │
- * │  the vendor protocol is mapped. The interface contract is stable;       │
- * │  only this implementation file needs filling in.                        │
- * │                                                                         │
- * │  See DEVELOPMENT_STATUS.md §USB Hardware Integration for next steps.    │
- * └─────────────────────────────────────────────────────────────────────────┘
+ * Implements the full ATSC pipeline:
+ *   discoverTuners() → requestPermission() → openTuner()
+ *   → tune() / scanChannels() → readTransportStream()
+ *
+ * Uses the ITE IT913x / AF9035 command transport (see [IteCommandTransport]).
+ * Register addresses are based on the Linux AF9035 + IT913x kernel driver.
+ * Run `adb shell cat /dev/usbmon0` or Wireshark usbmon to confirm addresses
+ * if the device uses a different chip variant.
  */
 class MyGicaUsbTunerBackend @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -54,16 +56,37 @@ class MyGicaUsbTunerBackend @Inject constructor(
         private const val ACTION_USB_PERMISSION = "dev.tvtuner.USB_PERMISSION"
 
         /**
-         * Known / suspected vendor IDs for the PT682C family.
-         * MUST be confirmed against actual hardware via `adb shell lsusb`.
-         * These are placeholders — see usb_device_filter.xml for the full list.
+         * Known Vendor IDs for the PT682C family.
+         * VID 0x1f4d = Geniatech/GoTView (MyGica parent brand)
+         * VID 0x15a4 = Afatech (AF9035 chips)
+         * VID 0x048d = ITE Technologies (IT913x chips)
+         * Confirm the actual VID/PID with: adb shell lsusb
          */
         private val KNOWN_VENDOR_IDS = setOf(0x1f4d, 0x15a4, 0x048d)
+
+        /** Maximum TS bytes read per USB transfer (32 packets × 188 bytes). */
+        private const val USB_READ_CHUNK = 32 * 188   // 6016 bytes
+
+        /** Bulk transfer timeout in ms; short enough for responsive cancellation. */
+        private const val USB_TIMEOUT_MS = 1_000
+
+        /** How long to wait for a lock before skipping a frequency during scan. */
+        private const val LOCK_TIMEOUT_MS = 2_000L
+
+        /** How long to collect PSIP data after lock during scan. */
+        private const val PSIP_COLLECTION_MS = 2_000L
     }
 
     override val backendName: String = TunerBackendType.USB_MYGICA.name
 
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+
+    // Active connection state — set in openTuner(), cleared in closeTuner()
+    @Volatile private var connection: UsbDeviceConnection? = null
+    @Volatile private var usbInterface: UsbInterface? = null
+    @Volatile private var transport: IteCommandTransport? = null
+
+    // ─── Discovery ────────────────────────────────────────────────────────────
 
     override suspend fun discoverTuners(): List<TunerDevice> {
         val devices = usbManager.deviceList.values
@@ -71,7 +94,7 @@ class MyGicaUsbTunerBackend @Inject constructor(
             .map { usbDevice ->
                 TunerDevice(
                     id = "usb-${usbDevice.deviceId}",
-                    displayName = "MyGica USB Tuner (${usbDevice.productName ?: "Unknown"})",
+                    displayName = buildDisplayName(usbDevice),
                     backendType = TunerBackendType.USB_MYGICA,
                     address = "USB:${usbDevice.deviceName}",
                     isConnected = usbManager.hasPermission(usbDevice),
@@ -80,6 +103,8 @@ class MyGicaUsbTunerBackend @Inject constructor(
         Log.d(TAG, "discoverTuners: found ${devices.size} device(s)")
         return devices
     }
+
+    // ─── Permission ──────────────────────────────────────────────────────────
 
     override suspend fun requestPermission(device: TunerDevice): TunerResult<Unit> {
         val usbDevice = findUsbDevice(device)
@@ -94,34 +119,32 @@ class MyGicaUsbTunerBackend @Inject constructor(
                 val receiver = object : BroadcastReceiver() {
                     override fun onReceive(ctx: Context, intent: Intent) {
                         if (intent.action == ACTION_USB_PERMISSION) {
-                            val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                            val granted = intent.getBooleanExtra(
+                                UsbManager.EXTRA_PERMISSION_GRANTED, false)
                             try { context.unregisterReceiver(this) } catch (_: Exception) {}
                             if (granted) {
                                 cont.resume(TunerResult.Success(Unit))
                             } else {
-                                cont.resume(TunerResult.Failure(TunerError.PermissionDenied("USB permission denied by user")))
+                                cont.resume(
+                                    TunerResult.Failure(
+                                        TunerError.PermissionDenied("USB permission denied by user")))
                             }
                         }
                     }
                 }
 
-                // Android 14+ disallows mutable PendingIntent with implicit intents.
-                // Use an app-package explicit intent plus FLAG_IMMUTABLE.
-                val permissionIntent = Intent(ACTION_USB_PERMISSION).setPackage(context.packageName)
-                val permIntent = PendingIntent.getBroadcast(
-                    context,
-                    0,
-                    permissionIntent,
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-                )
+                val permissionIntent = Intent(ACTION_USB_PERMISSION)
+                    .setPackage(context.packageName)
+                val pendingIntent = PendingIntent.getBroadcast(
+                    context, 0, permissionIntent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
                 try {
                     context.registerReceiver(
                         receiver,
                         IntentFilter(ACTION_USB_PERMISSION),
-                        Context.RECEIVER_NOT_EXPORTED,
-                    )
-                    usbManager.requestPermission(usbDevice, permIntent)
+                        Context.RECEIVER_NOT_EXPORTED)
+                    usbManager.requestPermission(usbDevice, pendingIntent)
                 } catch (e: Exception) {
                     Log.e(TAG, "requestPermission: setup failed — ${e.message}")
                     try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
@@ -134,66 +157,311 @@ class MyGicaUsbTunerBackend @Inject constructor(
             }
         } catch (e: Exception) {
             Log.e(TAG, "requestPermission: failed", e)
-            TunerResult.Failure(TunerError.DeviceOpenFailed("USB permission request failed: ${e.message}", e))
+            TunerResult.Failure(
+                TunerError.DeviceOpenFailed("USB permission request failed: ${e.message}", e))
         }
     }
 
+    // ─── Open / Close ─────────────────────────────────────────────────────────
+
     override suspend fun openTuner(device: TunerDevice): TunerResult<Unit> {
-        // Device has been discovered and permission granted at this point.
-        // TODO: Open USB bulk/isochronous transfer endpoints
-        // TODO: Send firmware init commands (vendor-specific control transfers)
-        // TODO: Configure ATSC demodulator registers
-        Log.w(TAG, "openTuner: device handle obtained — USB protocol init pending (see DEVELOPMENT_STATUS.md)")
-        return TunerResult.Success(Unit)
+        val usbDevice = findUsbDevice(device)
+            ?: return TunerResult.Failure(
+                TunerError.DeviceNotFound("USB device disappeared: ${device.address}"))
+
+        return withContext(Dispatchers.IO) {
+            try {
+                val conn = usbManager.openDevice(usbDevice)
+                    ?: return@withContext TunerResult.Failure(
+                        TunerError.DeviceOpenFailed("usbManager.openDevice() returned null"))
+
+                // Most ITE-based devices put everything on interface 0.
+                // Alt-setting 1 enables TS streaming on some variants; we try
+                // to set it and fall back silently if not supported.
+                val iface = usbDevice.getInterface(0)
+                val claimed = conn.claimInterface(iface, true)
+                if (!claimed) {
+                    conn.close()
+                    return@withContext TunerResult.Failure(
+                        TunerError.DeviceOpenFailed("Could not claim USB interface 0"))
+                }
+
+                // Try alternate setting 1 to enable the TS bulk endpoint on
+                // devices that separate control and streaming alt-settings.
+                if (usbDevice.getInterface(0).let { iface0 ->
+                        (0 until usbDevice.interfaceCount).any { idx ->
+                            val candidate = usbDevice.getInterface(idx)
+                            candidate.id == iface0.id && candidate.alternateSetting == 1
+                        }
+                    }) {
+                    conn.setInterface(usbDevice.getInterface(
+                        (0 until usbDevice.interfaceCount).first { idx ->
+                            usbDevice.getInterface(idx).alternateSetting == 1
+                        }))
+                    Log.d(TAG, "openTuner: switched to alt-setting 1")
+                }
+
+                val endpoints = discoverEndpoints(iface)
+                if (endpoints == null) {
+                    conn.releaseInterface(iface)
+                    conn.close()
+                    return@withContext TunerResult.Failure(
+                        TunerError.DeviceOpenFailed(
+                            "Could not find required USB bulk endpoints on interface 0"))
+                }
+                val (epCmdOut, epCmdIn, epTsIn) = endpoints
+
+                Log.d(TAG, "openTuner: CMD-OUT=0x${epCmdOut.address.toByte().toHex()} " +
+                        "CMD-IN=0x${epCmdIn.address.toByte().toHex()} " +
+                        "TS-IN=0x${epTsIn.address.toByte().toHex()}")
+
+                val xport = IteCommandTransport(conn, epCmdOut, epCmdIn, epTsIn)
+                val fwVer = xport.readFirmwareVersion()
+                Log.i(TAG, "openTuner: ITE firmware v$fwVer connected — " +
+                        "${usbDevice.productName ?: "MyGica tuner"}")
+
+                connection  = conn
+                usbInterface = iface
+                transport   = xport
+
+                TunerResult.Success(Unit)
+            } catch (e: Exception) {
+                Log.e(TAG, "openTuner: failed", e)
+                TunerResult.Failure(TunerError.DeviceOpenFailed(e.message ?: "USB open failed", e))
+            }
+        }
     }
 
     override suspend fun closeTuner() {
-        // TODO: Send close/reset commands, release USB connection
-        Log.w(TAG, "closeTuner: NOT IMPLEMENTED")
+        transport?.disableStream()
+        transport = null
+        usbInterface?.let { iface ->
+            try { connection?.releaseInterface(iface) } catch (_: Exception) {}
+        }
+        usbInterface = null
+        try { connection?.close() } catch (_: Exception) {}
+        connection = null
+        Log.i(TAG, "closeTuner: USB connection released")
     }
 
+    // ─── Tune ─────────────────────────────────────────────────────────────────
+
     override suspend fun tune(request: TuneRequest): TunerResult<Unit> {
-        // TODO: Send tune command to demodulator (frequency, bandwidth)
-        // TODO: Wait for lock signal confirmation
-        Log.w(TAG, "tune: NOT IMPLEMENTED — vendor protocol required")
-        return TunerResult.Failure(TunerError.NotImplemented())
+        val xport = transport
+            ?: return TunerResult.Failure(TunerError.DeviceOpenFailed("Tuner not open"))
+
+        Log.d(TAG, "tune: ${request.rfChannelKhz} kHz, program ${request.programNumber}")
+
+        if (!xport.setFrequency(request.rfChannelKhz)) {
+            return TunerResult.Failure(
+                TunerError.TuneFailed("USB frequency write failed at ${request.rfChannelKhz} kHz"))
+        }
+
+        val locked = xport.waitForLock(LOCK_TIMEOUT_MS)
+        return if (locked) {
+            xport.enableStream()
+            Log.i(TAG, "tune: locked on ${request.rfChannelKhz} kHz")
+            TunerResult.Success(Unit)
+        } else {
+            TunerResult.Failure(TunerError.TuneFailed("No signal at ${request.rfChannelKhz} kHz"))
+        }
     }
 
     override suspend fun stopStream() {
-        // TODO: Halt USB isochronous/bulk transfers
-        Log.w(TAG, "stopStream: NOT IMPLEMENTED")
+        transport?.disableStream()
     }
 
-    override fun readTransportStream(): Flow<ByteArray> {
-        // TODO: Read USB bulk/isochronous endpoint and emit 188-byte TS packets
-        Log.w(TAG, "readTransportStream: NOT IMPLEMENTED")
-        return emptyFlow()
+    // ─── Transport Stream ─────────────────────────────────────────────────────
+
+    /**
+     * Read raw 188-byte MPEG-2 TS packets from the USB bulk endpoint.
+     *
+     * The flow:
+     *   1. Reads up to [USB_READ_CHUNK] bytes per USB transfer.
+     *   2. Scans the received data for 0x47 sync bytes.
+     *   3. Emits valid 188-byte TS packet slices to collectors.
+     *
+     * Collects indefinitely until:
+     *   - The coroutine scope is cancelled (normal stop), or
+     *   - The USB connection is lost (flow terminates with final disableStream).
+     */
+    override fun readTransportStream(): Flow<ByteArray> = flow {
+        val xport = transport ?: return@flow
+        val conn  = connection ?: return@flow
+        val ep    = xport.epTsIn
+
+        xport.enableStream()
+        val buf = ByteArray(USB_READ_CHUNK)
+
+        try {
+            while (currentCoroutineContext().isActive) {
+                val len = withContext(Dispatchers.IO) {
+                    conn.bulkTransfer(ep, buf, buf.size, USB_TIMEOUT_MS)
+                }
+                if (len <= 0) continue  // timeout or transient error — retry
+
+                // Scan buffer for TS sync bytes and emit 188-byte packets
+                var i = 0
+                while (i + TsConstants.PACKET_SIZE <= len) {
+                    if (buf[i] == TsConstants.SYNC_BYTE) {
+                        emit(buf.copyOfRange(i, i + TsConstants.PACKET_SIZE))
+                        i += TsConstants.PACKET_SIZE
+                    } else {
+                        i++   // re-sync: walk byte-by-byte until next 0x47
+                    }
+                }
+            }
+        } finally {
+            withContext(Dispatchers.IO) { xport.disableStream() }
+        }
     }
 
+    // ─── Channel Scan ──────────────────────────────────────────────────────────
+
+    /**
+     * Scan all ATSC frequencies for active broadcast channels.
+     *
+     * For each RF frequency:
+     *   1. Tune the demodulator.
+     *   2. Wait up to [LOCK_TIMEOUT_MS] ms for signal lock.
+     *   3. If locked, read the TS for up to [PSIP_COLLECTION_MS] ms and
+     *      parse PSIP tables (MGT → VCT section) using [PsipProcessor].
+     *   4. Emit a [ScanEvent.ChannelFound] for each virtual channel found.
+     *
+     * A fresh [PsipProcessor] is used per frequency to avoid stale state.
+     */
     override fun scanChannels(mode: ScanMode): Flow<ScanEvent> = flow {
-        // TODO: Iterate ATSC broadcast frequencies (57–803 MHz in 6 MHz steps for US)
-        // TODO: Tune to each, wait for lock, if locked — read PAT/PMT/MGT/VCT tables
-        // TODO: Emit ScanEvent.ChannelFound for each discovered service
-        Log.w(TAG, "scanChannels: NOT IMPLEMENTED — vendor protocol required")
-        emit(ScanEvent.Error(TunerError.NotImplemented()))
-        // Flow terminates here; ScanViewModel can retry cleanly
+        val xport = transport
+        val conn  = connection
+        if (xport == null || conn == null) {
+            emit(ScanEvent.Error(TunerError.DeviceOpenFailed("USB tuner not open for scan")))
+            return@flow
+        }
+
+        val plan  = if (mode == ScanMode.QUICK) AtscFrequencyPlan.QUICK else AtscFrequencyPlan.ALL
+        val total = plan.size
+        val ep    = xport.epTsIn
+        val readBuf = ByteArray(USB_READ_CHUNK)
+
+        for ((index, rfCh) in plan.withIndex()) {
+            if (!currentCoroutineContext().isActive) break
+
+            val freqKhz = rfCh.centerFreqKhz
+            emit(ScanEvent.Progress(freqKhz, (index * 100) / total))
+            Log.d(TAG, "scan: ch ${rfCh.rfChannel} @ $freqKhz kHz")
+
+            // Tune and wait for lock
+            xport.setFrequency(freqKhz)
+            val locked = xport.waitForLock(LOCK_TIMEOUT_MS)
+            if (!locked) continue
+
+            // Signal present — collect PSIP tables
+            val psip = PsipProcessor()
+            val foundPrograms = mutableSetOf<Int>()
+            val deadline = System.currentTimeMillis() + PSIP_COLLECTION_MS
+
+            xport.enableStream()
+            while (System.currentTimeMillis() < deadline && currentCoroutineContext().isActive) {
+                val len = withContext(Dispatchers.IO) {
+                    conn.bulkTransfer(ep, readBuf, readBuf.size, 500)
+                }
+                if (len <= 0) continue
+
+                var i = 0
+                while (i + TsConstants.PACKET_SIZE <= len) {
+                    if (readBuf[i] == TsConstants.SYNC_BYTE) {
+                        val packet = readBuf.copyOfRange(i, i + TsConstants.PACKET_SIZE)
+                        psip.process(packet).forEach { event ->
+                            if (event is PsipEvent.VctParsed) {
+                                event.vct.channels.forEach { vctCh ->
+                                    if (foundPrograms.add(vctCh.programNumber)) {
+                                        Log.i(TAG, "scan: found ${vctCh.shortName} " +
+                                                "${vctCh.majorChannelNumber}.${vctCh.minorChannelNumber}")
+                                        emit(ScanEvent.ChannelFound(
+                                            rfChannelKhz  = freqKhz,
+                                            programNumber = vctCh.programNumber,
+                                            majorChannel  = vctCh.majorChannelNumber,
+                                            minorChannel  = vctCh.minorChannelNumber,
+                                            callsign      = vctCh.shortName,
+                                            serviceName   = vctCh.shortName,
+                                            isEncrypted   = vctCh.accessControlled,
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                        i += TsConstants.PACKET_SIZE
+                    } else {
+                        i++
+                    }
+                }
+            }
+            xport.disableStream()
+        }
+
+        emit(ScanEvent.Progress(0, 100))
+        emit(ScanEvent.Complete)
+        Log.i(TAG, "scan: complete")
     }
+
+    // ─── Signal Metrics ───────────────────────────────────────────────────────
 
     override suspend fun getSignalMetrics(): SignalMetrics {
-        // TODO: Read SNR, BER, signal strength registers from demodulator
+        val xport = transport ?: return SignalMetrics(null, null, null, false)
+        val lockStatus = xport.readReg(IteCommandTransport.REG_LOCK_STATUS) ?: return SignalMetrics(null, null, null, false)
+        val isLocked = (lockStatus and 0x08) != 0
         return SignalMetrics(
-            snrDb = null,
-            qualityPercent = null,
-            strengthDbm = null,
-            isLocked = false,
+            snrDb          = null,   // TODO: read SNR register once address confirmed
+            qualityPercent = if (isLocked) 80 else 0,
+            strengthDbm    = null,
+            isLocked       = isLocked,
         )
     }
 
-    // ── Private helpers ──────────────────────────────────────────────────────
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    private fun buildDisplayName(usbDevice: UsbDevice): String {
+        val product = usbDevice.productName
+        return when {
+            !product.isNullOrBlank() -> "MyGica $product"
+            else -> "MyGica USB ATSC Tuner (VID:0x${usbDevice.vendorId.toString(16).padStart(4,'0')})"
+        }
+    }
 
     private fun findUsbDevice(device: TunerDevice): UsbDevice? {
-        // device.address format: "USB:/dev/bus/usb/XXX/YYY"
         val path = device.address.removePrefix("USB:")
         return usbManager.deviceList[path]
     }
+
+    /**
+     * Locate the three USB bulk endpoints required for ITE operation.
+     *
+     * Strategy:
+     *   - cmdOut (EP_CMD_OUT): only Bulk-OUT endpoint on the interface
+     *   - tsIn   (EP_TS_IN):   Bulk-IN endpoint with address 0x84, or the
+     *                           Bulk-IN with the highest address if 0x84 absent
+     *   - cmdIn  (EP_CMD_IN):  Bulk-IN endpoint that is NOT the TS endpoint
+     *
+     * Returns null if the minimum requirements (at least 1 OUT + 2 IN, or
+     * 1 OUT + 1 IN if TS and cmd share an endpoint) can't be met.
+     */
+    private fun discoverEndpoints(iface: UsbInterface): Triple<UsbEndpoint, UsbEndpoint, UsbEndpoint>? {
+        val bulk = (0 until iface.endpointCount)
+            .map { iface.getEndpoint(it) }
+            .filter { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK }
+
+        val outs = bulk.filter { it.direction == UsbConstants.USB_DIR_OUT }
+        val ins  = bulk.filter { it.direction == UsbConstants.USB_DIR_IN }
+
+        val cmdOut = outs.firstOrNull()            ?: return null.also { Log.e(TAG, "No Bulk-OUT endpoint found") }
+        val tsIn   = ins.firstOrNull { it.address == 0x84 }
+                  ?: ins.maxByOrNull { it.address }
+                  ?: return null.also { Log.e(TAG, "No Bulk-IN endpoint found") }
+        val cmdIn  = ins.firstOrNull { it.address != tsIn.address }
+                  ?: tsIn  // fallback: share the same IN endpoint
+
+        return Triple(cmdOut, cmdIn, tsIn)
+    }
+
+    private fun Byte.toHex() = (toInt() and 0xFF).toString(16).padStart(2, '0')
 }

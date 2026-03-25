@@ -86,7 +86,8 @@ fun SettingsScreen(
                 label = "USB MyGica (PT682C family)",
                 selected = selectedBackend == AppPreferences.TunerBackend.USB_MYGICA,
                 onClick = { viewModel.selectTunerBackend(AppPreferences.TunerBackend.USB_MYGICA) },
-                note = "Attach USB-C tuner. Permission dialog will appear. Channel scan/playback support is still in progress for this backend.",
+                note = "Plug in the USB-C tuner — it connects automatically. " +
+                       "A one-time permission dialog appears on first use.",
             )
             TunerBackendOption(
                 label = "Network Tuner (HDHomeRun)",

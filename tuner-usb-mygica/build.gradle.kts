@@ -20,6 +20,7 @@ android {
 
 dependencies {
     implementation(project(":tuner-core"))
+    implementation(project(":parser-atsc-psip"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.hilt.android)

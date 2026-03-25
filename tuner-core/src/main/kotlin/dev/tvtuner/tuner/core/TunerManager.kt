@@ -9,7 +9,6 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 import javax.inject.Singleton
-
 /**
  * Manages the active [TunerBackend] and provides app-wide tuner state.
  *
@@ -115,6 +114,40 @@ class TunerManager @Inject constructor(
     }
 
     fun getActiveBackend(): TunerBackend? = activeBackend
+
+    /**
+     * Look for any USB tuner already connected (i.e. USB permission already granted).
+     * If found and no tuner is currently active, select it automatically without
+     * requiring user interaction.
+     *
+     * Called:
+     *   • On app start (SettingsViewModel.init) — picks up a device that was
+     *     plugged in before the app launched.
+     *   • When USB_DEVICE_ATTACHED fires (MainActivity) — picks up a newly
+     *     inserted device; if permission was previously granted it connects
+     *     instantly; otherwise the USB permission dialog appears once.
+     *
+     * @return true if a USB device was found and selection was attempted.
+     */
+    suspend fun autoSelectUsbIfAvailable(): Boolean {
+        if (_state.value is TunerState.Ready || _state.value is TunerState.Tuned) {
+            Log.d(TAG, "autoSelectUsb: tuner already active, skipping")
+            return false
+        }
+        val usbBackend = backends.firstOrNull {
+            it.backendName == TunerBackendType.USB_MYGICA.name
+        } ?: return false
+
+        val devices = try { usbBackend.discoverTuners() } catch (e: Exception) { emptyList() }
+        val device  = devices.firstOrNull() ?: run {
+            Log.d(TAG, "autoSelectUsb: no USB tuner found")
+            return false
+        }
+
+        Log.i(TAG, "autoSelectUsb: found ${device.displayName}, selecting…")
+        select(device)   // triggers permission dialog if first-time, silent if already granted
+        return true
+    }
 }
 
 sealed class TunerState {
