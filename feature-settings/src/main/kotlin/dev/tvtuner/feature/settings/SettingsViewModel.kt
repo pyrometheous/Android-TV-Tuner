@@ -46,21 +46,27 @@ class SettingsViewModel @Inject constructor(
     val selectError: StateFlow<String?> = _selectError.asStateFlow()
 
     init {
-        // Auto-select any connected USB tuner on startup without requiring user
-        // navigation to Settings. If the device was inserted before the app
-        // launched and permission was already granted, this is fully silent.
-        // If it's a first-time attach the system USB permission dialog appears.
+        // On startup, discover all connected tuners so the UI shows them
+        // immediately without the user pressing "Scan". Then auto-select any
+        // USB tuner that is already attached (silent if permission granted
+        // previously; shows USB dialog on first-ever connection).
         viewModelScope.launch {
+            _isScanning.value = true
+            _discoveredTuners.value = tunerManager.discoverAll()
+            _isScanning.value = false
             tunerManager.autoSelectUsbIfAvailable()
         }
     }
 
     /**
-     * Called from MainActivity when ACTION_USB_DEVICE_ATTACHED fires —
-     * handles a device being plugged in while the app is already running.
+     * Called from MainActivity when ACTION_USB_DEVICE_ATTACHED fires.
+     * Refreshes the device list and auto-selects the newly inserted tuner.
      */
     fun onUsbDeviceAttached() {
         viewModelScope.launch {
+            _isScanning.value = true
+            _discoveredTuners.value = tunerManager.discoverAll()
+            _isScanning.value = false
             tunerManager.autoSelectUsbIfAvailable()
         }
     }

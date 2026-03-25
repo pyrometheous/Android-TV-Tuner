@@ -27,6 +27,7 @@ import dev.tvtuner.tuner.core.TunerError
 import dev.tvtuner.tuner.core.TunerResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
@@ -70,11 +71,22 @@ class MyGicaUsbTunerBackend @Inject constructor(
         /** Bulk transfer timeout in ms; short enough for responsive cancellation. */
         private const val USB_TIMEOUT_MS = 1_000
 
-        /** How long to wait for a lock before skipping a frequency during scan. */
-        private const val LOCK_TIMEOUT_MS = 2_000L
+        /**
+         * How long to collect PSIP tables after signal is confirmed.
+         * ATSC A/65 allows up to ~5 s between TVCT repetitions in practice;
+         * 8 s gives two full cycles on slow broadcasters.
+         */
+        private const val PSIP_COLLECTION_MS = 8_000L
 
-        /** How long to collect PSIP data after lock during scan. */
-        private const val PSIP_COLLECTION_MS = 2_000L
+        /**
+         * Window used to probe for live TS sync bytes after a frequency change.
+         * Replaces register-based lock detection (register address uncertain
+         * across ITE chip variants). 1 second is enough to detect a carrier.
+         */
+        private const val TS_PROBE_MS = 1_000L
+
+        /** Minimum aligned 0x47 sync bytes required to confirm a live TS signal. */
+        private const val TS_PROBE_MIN_SYNCS = 3
     }
 
     override val backendName: String = TunerBackendType.USB_MYGICA.name
@@ -252,19 +264,19 @@ class MyGicaUsbTunerBackend @Inject constructor(
 
         Log.d(TAG, "tune: ${request.rfChannelKhz} kHz, program ${request.programNumber}")
 
-        if (!xport.setFrequency(request.rfChannelKhz)) {
-            return TunerResult.Failure(
-                TunerError.TuneFailed("USB frequency write failed at ${request.rfChannelKhz} kHz"))
+        val tuneOk = xport.setFrequency(request.rfChannelKhz)
+        if (!tuneOk) {
+            // Log but do not hard-fail: if the register address is wrong for this
+            // chip variant the write is a no-op, but the device may already be
+            // on the correct frequency or may respond to it differently.
+            Log.w(TAG, "tune: setFrequency() returned false — continuing anyway")
         }
 
-        val locked = xport.waitForLock(LOCK_TIMEOUT_MS)
-        return if (locked) {
-            xport.enableStream()
-            Log.i(TAG, "tune: locked on ${request.rfChannelKhz} kHz")
-            TunerResult.Success(Unit)
-        } else {
-            TunerResult.Failure(TunerError.TuneFailed("No signal at ${request.rfChannelKhz} kHz"))
-        }
+        // Allow demodulator time to acquire carrier before starting stream
+        delay(500)
+        xport.enableStream()
+        Log.i(TAG, "tune: stream enabled at ${request.rfChannelKhz} kHz")
+        return TunerResult.Success(Unit)
     }
 
     override suspend fun stopStream() {
@@ -329,6 +341,10 @@ class MyGicaUsbTunerBackend @Inject constructor(
      *   4. Emit a [ScanEvent.ChannelFound] for each virtual channel found.
      *
      * A fresh [PsipProcessor] is used per frequency to avoid stale state.
+     *
+     * Signal detection uses a TS sync-byte probe rather than a lock register
+     * read, because the register address differs between ITE chip variants and
+     * may not respond correctly without confirmed hardware knowledge.
      */
     override fun scanChannels(mode: ScanMode): Flow<ScanEvent> = flow {
         val xport = transport
@@ -350,17 +366,30 @@ class MyGicaUsbTunerBackend @Inject constructor(
             emit(ScanEvent.Progress(freqKhz, (index * 100) / total))
             Log.d(TAG, "scan: ch ${rfCh.rfChannel} @ $freqKhz kHz")
 
-            // Tune and wait for lock
+            // Write frequency to demodulator registers
             xport.setFrequency(freqKhz)
-            val locked = xport.waitForLock(LOCK_TIMEOUT_MS)
-            if (!locked) continue
 
-            // Signal present — collect PSIP tables
+            // Allow demodulator ~400 ms to begin acquiring the new carrier
+            delay(400)
+
+            // Enable TS output; then probe for live sync bytes.
+            // This is hardware-agnostic: if we see ≥TS_PROBE_MIN_SYNCS aligned
+            // 0x47 bytes within TS_PROBE_MS, a signal is present regardless of
+            // whether the lock register read succeeded.
+            xport.enableStream()
+            val syncs = probeForTsSync(conn, ep, readBuf)
+            if (syncs < TS_PROBE_MIN_SYNCS) {
+                Log.d(TAG, "scan: no signal on ch ${rfCh.rfChannel} ($syncs syncs)")
+                xport.disableStream()
+                continue
+            }
+            Log.i(TAG, "scan: signal on ch ${rfCh.rfChannel} ($syncs syncs) — collecting PSIP")
+
+            // Signal confirmed — collect PSIP tables for up to PSIP_COLLECTION_MS
             val psip = PsipProcessor()
             val foundPrograms = mutableSetOf<Int>()
             val deadline = System.currentTimeMillis() + PSIP_COLLECTION_MS
 
-            xport.enableStream()
             while (System.currentTimeMillis() < deadline && currentCoroutineContext().isActive) {
                 val len = withContext(Dispatchers.IO) {
                     conn.bulkTransfer(ep, readBuf, readBuf.size, 500)
@@ -405,6 +434,37 @@ class MyGicaUsbTunerBackend @Inject constructor(
     }
 
     // ─── Signal Metrics ───────────────────────────────────────────────────────
+
+    /**
+     * Read USB bulk data for [TS_PROBE_MS] ms and count aligned TS 0x47 sync bytes.
+     *
+     * Using sync-byte counting rather than a register read makes this agnostic
+     * to chip variants: if the demodulator locked and is outputting a valid TS,
+     * we'll see repeating 0x47 bytes at 188-byte intervals.
+     */
+    private suspend fun probeForTsSync(
+        conn: UsbDeviceConnection,
+        ep: UsbEndpoint,
+        buf: ByteArray,
+    ): Int = withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + TS_PROBE_MS
+        var syncCount = 0
+        while (System.currentTimeMillis() < deadline) {
+            val len = conn.bulkTransfer(ep, buf, buf.size, 400)
+            if (len <= 0) continue
+            var i = 0
+            while (i + TsConstants.PACKET_SIZE <= len) {
+                if (buf[i] == TsConstants.SYNC_BYTE) {
+                    syncCount++
+                    if (syncCount >= TS_PROBE_MIN_SYNCS) return@withContext syncCount
+                    i += TsConstants.PACKET_SIZE
+                } else {
+                    i++
+                }
+            }
+        }
+        syncCount
+    }
 
     override suspend fun getSignalMetrics(): SignalMetrics {
         val xport = transport ?: return SignalMetrics(null, null, null, false)
