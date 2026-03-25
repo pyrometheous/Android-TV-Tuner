@@ -7,6 +7,7 @@ import dev.tvtuner.core.data.preferences.AppPreferences
 import dev.tvtuner.core.data.repository.ChannelRepository
 import dev.tvtuner.tuner.core.TunerDevice
 import dev.tvtuner.tuner.core.TunerManager
+import dev.tvtuner.tuner.core.TunerState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -37,12 +38,19 @@ class SettingsViewModel @Inject constructor(
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
+    val tunerState: StateFlow<TunerState> = tunerManager.state
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), TunerState.Idle)
+
     fun scanForNetworkTuners() {
         viewModelScope.launch {
             _isScanning.value = true
             _discoveredTuners.value = tunerManager.discoverAll()
             _isScanning.value = false
         }
+    }
+
+    fun selectDevice(device: TunerDevice) {
+        viewModelScope.launch { tunerManager.select(device) }
     }
 
     fun selectTunerBackend(backend: String) {

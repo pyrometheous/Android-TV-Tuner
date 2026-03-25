@@ -8,7 +8,6 @@ import kotlinx.coroutines.flow.Flow
  * Implementations:
  *   - [dev.tvtuner.tuner.usb.MyGicaUsbTunerBackend] — USB-C hardware (PT682C family)
  *   - [dev.tvtuner.tuner.network.HdhrTunerBackend] — HDHomeRun network tuner
- *   - [dev.tvtuner.tuner.fake.FakeTunerBackend] — Demo/test mode
  *
  * Threading: All suspend functions are safe to call from any coroutine context.
  * Flows are cold and will start work only when collected.

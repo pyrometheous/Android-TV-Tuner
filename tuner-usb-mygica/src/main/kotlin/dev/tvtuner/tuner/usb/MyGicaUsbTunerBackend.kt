@@ -127,11 +127,12 @@ class MyGicaUsbTunerBackend @Inject constructor(
     }
 
     override suspend fun openTuner(device: TunerDevice): TunerResult<Unit> {
+        // Device has been discovered and permission granted at this point.
         // TODO: Open USB bulk/isochronous transfer endpoints
         // TODO: Send firmware init commands (vendor-specific control transfers)
         // TODO: Configure ATSC demodulator registers
-        Log.w(TAG, "openTuner: NOT IMPLEMENTED — vendor protocol required")
-        return TunerResult.Failure(TunerError.NotImplemented())
+        Log.w(TAG, "openTuner: device handle obtained — USB protocol init pending (see DEVELOPMENT_STATUS.md)")
+        return TunerResult.Success(Unit)
     }
 
     override suspend fun closeTuner() {

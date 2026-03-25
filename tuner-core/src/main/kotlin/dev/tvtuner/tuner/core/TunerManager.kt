@@ -5,6 +5,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -68,14 +70,19 @@ class TunerManager @Inject constructor(
     }
 
     fun readTransportStream(): Flow<ByteArray> {
-        val backend = activeBackend
-            ?: throw IllegalStateException("No active tuner — call select() first")
+        val backend = activeBackend ?: run {
+            Log.w(TAG, "readTransportStream called with no active tuner")
+            return emptyFlow()
+        }
         return backend.readTransportStream()
     }
 
     fun scanChannels(mode: ScanMode = ScanMode.FULL): Flow<ScanEvent> {
-        val backend = activeBackend
-            ?: throw IllegalStateException("No active tuner — call select() first")
+        val backend = activeBackend ?: return flow {
+            emit(ScanEvent.Error(TunerError.DeviceNotFound(
+                "No tuner selected. Connect your tuner and select it before scanning."
+            )))
+        }
         return backend.scanChannels(mode)
     }
 

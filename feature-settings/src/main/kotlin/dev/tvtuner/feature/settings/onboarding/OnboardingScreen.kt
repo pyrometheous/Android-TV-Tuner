@@ -1,6 +1,7 @@
 package dev.tvtuner.feature.settings.onboarding
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +38,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.tvtuner.feature.settings.SettingsViewModel
 import dev.tvtuner.feature.livetv.ScanViewModel
 import dev.tvtuner.feature.livetv.ScanUiState
+import dev.tvtuner.tuner.core.TunerState
 
 private const val STEP_WELCOME = 0
 private const val STEP_TUNER = 1
@@ -54,7 +56,14 @@ fun OnboardingScreen(
 
     val discovered by settingsViewModel.discoveredTuners.collectAsStateWithLifecycle()
     val isScanning by settingsViewModel.isScanning.collectAsStateWithLifecycle()
+    val tunerState by settingsViewModel.tunerState.collectAsStateWithLifecycle()
     val scanState by scanViewModel.uiState.collectAsStateWithLifecycle()
+
+    val selectedDeviceId: String? = when (val ts = tunerState) {
+        is TunerState.Ready -> ts.device.id
+        is TunerState.Tuned -> ts.device.id
+        else -> null
+    }
 
     Scaffold { inner ->
         Column(
@@ -79,7 +88,9 @@ fun OnboardingScreen(
                     STEP_TUNER -> TunerStep(
                         discovered = discovered,
                         isScanning = isScanning,
+                        selectedDeviceId = selectedDeviceId,
                         onScan = { settingsViewModel.scanForNetworkTuners() },
+                        onSelect = { settingsViewModel.selectDevice(it) },
                     )
                     STEP_SCAN -> ChannelScanStep(
                         scanState = scanState,
@@ -160,7 +171,9 @@ private fun WelcomeStep() {
 private fun TunerStep(
     discovered: List<dev.tvtuner.tuner.core.TunerDevice>,
     isScanning: Boolean,
+    selectedDeviceId: String?,
     onScan: () -> Unit,
+    onSelect: (dev.tvtuner.tuner.core.TunerDevice) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -183,10 +196,35 @@ private fun TunerStep(
             Text("  Scan for tuners")
         }
         discovered.forEach { device ->
-            Row(verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(Icons.Default.Check, null, tint = MaterialTheme.colorScheme.primary)
-                Text(device.displayName, style = MaterialTheme.typography.bodyMedium)
+            val isSelected = device.id == selectedDeviceId
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelect(device) }
+                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = if (isSelected) Icons.Default.Check else Icons.Default.Tv,
+                    contentDescription = null,
+                    tint = if (isSelected) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = device.displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                    color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                )
+                if (isSelected) {
+                    Text(
+                        "Active",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
         }
         if (discovered.isEmpty() && !isScanning) {
