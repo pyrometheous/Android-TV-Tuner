@@ -75,7 +75,12 @@ interface TunerBackend {
 enum class ScanMode { FULL, QUICK }
 
 sealed class ScanEvent {
-    data class Progress(val rfChannelKhz: Int, val percentComplete: Int) : ScanEvent()
+    data class Progress(
+        val rfChannelKhz: Int,
+        val percentComplete: Int,
+        /** RF channel number (e.g. 14 for UHF ch 14); 0 if unknown. */
+        val rfChannelNumber: Int = 0,
+    ) : ScanEvent()
     data class ChannelFound(
         val rfChannelKhz: Int,
         val programNumber: Int,

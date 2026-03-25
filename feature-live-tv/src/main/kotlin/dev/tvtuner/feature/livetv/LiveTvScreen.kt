@@ -27,21 +27,27 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.SignalCellularAlt
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -130,6 +136,7 @@ fun LiveTvScreen(
                 onChannelUp = { viewModel.channelUp() },
                 onChannelDown = { viewModel.channelDown() },
                 onToggleFavorite = { viewModel.toggleFavorite() },
+                onTuneToChannel = { viewModel.tuneToChannelInput(it) },
                 onOpenGuide = onOpenGuide,
                 onOpenRecordings = onOpenRecordings,
                 onEnterPip = onEnterPip,
@@ -167,11 +174,13 @@ private fun LiveTvOverlay(
     onChannelUp: () -> Unit,
     onChannelDown: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onTuneToChannel: (String) -> Unit,
     onOpenGuide: () -> Unit,
     onOpenRecordings: () -> Unit,
     onEnterPip: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var channelInput by remember { mutableStateOf("") }
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -247,6 +256,40 @@ private fun LiveTvOverlay(
             IconButton(onClick = { /* TODO: record */ }) {
                 Icon(Icons.Default.Circle, "Record", tint = Color.Red)
             }
+        }
+        // Manual channel entry row
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = channelInput,
+                onValueChange = { channelInput = it },
+                placeholder = { Text("6.4", color = Color.Gray, style = MaterialTheme.typography.bodySmall) },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodySmall.copy(color = Color.White),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    keyboardType = KeyboardType.Decimal,
+                ),
+                modifier = Modifier.width(110.dp),
+            )
+            Button(
+                onClick = {
+                    if (channelInput.isNotBlank()) {
+                        onTuneToChannel(channelInput)
+                        channelInput = ""
+                    }
+                },
+            ) {
+                Text("Go")
+            }
+            Text(
+                "Enter channel",
+                color = Color.Gray,
+                style = MaterialTheme.typography.labelSmall,
+            )
         }
     }
 }

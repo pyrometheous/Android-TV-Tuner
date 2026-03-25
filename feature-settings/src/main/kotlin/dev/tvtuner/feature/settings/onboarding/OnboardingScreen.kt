@@ -279,7 +279,7 @@ private fun ChannelScanStep(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
-                    "Scanning ${scanState.currentFreqKhz / 1000} MHz… (${scanState.channelsFound} found)",
+                    "Scanning Ch ${scanState.currentRfChannel}… (${scanState.channelsFound} found)",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

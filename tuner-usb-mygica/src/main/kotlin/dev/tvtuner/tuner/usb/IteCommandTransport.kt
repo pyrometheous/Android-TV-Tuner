@@ -12,24 +12,22 @@ import kotlinx.coroutines.withContext
  * ─── PROTOCOL REFERENCE ──────────────────────────────────────────────────────
  * Based on: Linux kernel drivers/media/usb/dvb-usb-v2/af9035.c, it913x.c
  *
- * Command TX packet layout (sent on EP_CMD_OUT, e.g. 0x02):
- *   Byte  0   : payload_len = 9 + data_len
- *                (bytes after [0] up to and including last data byte)
- *   Byte  1   : mbox address (0x00 = host interface)
+ * Command TX packet layout (sent on EP_CMD_OUT, e.g. 0x02) — AF9035 protocol:
+ *   Byte  0   : header byte = REQ_HDR_LEN(4) + wlen + CHECKSUM_LEN(2) - 1
+ *   Byte  1   : mbox = (reg >> 16) & 0xFF  (high byte of 24-bit address)
  *   Byte  2   : command ID (CMD_MEM_RD, CMD_MEM_WR, …)
  *   Byte  3   : sequence number (auto-incremented per transfer)
- *   Bytes 4–7 : register/target address, big-endian 32-bit
- *   Byte  8   : addr_len (3 for 24-bit register addresses)
- *   Byte  9   : data_len (bytes to write, or expected bytes to read)
- *   Bytes 10+ : data payload (for writes) or zeros (for reads)
- *   Last  1   : 2's-complement checksum of bytes [0 .. payload_len]
+ *   Bytes 4+  : wbuf = [dataLen, 0x02, 0x00, 0x00, regHi, regLo, data…]
+ *               where regHi = (reg >> 8) & 0xFF, regLo = reg & 0xFF
+ *   Last  2   : 16-bit checksum = ~(alternating big-endian sum of buf[1..n])
+ *               placed at buf[buf[0]-1] (hi) and buf[buf[0]] (lo)
  *
- * Response RX packet (received on EP_CMD_IN, e.g. 0x81):
- *   Byte 0    : length (4 + response_data_len)
- *   Byte 1    : mbox (echoed)
- *   Byte 2    : cmd  (echoed)
- *   Byte 3    : seq  (echoed)
- *   Bytes 4+  : response data (for reads)
+ * Response RX packet (received on EP_CMD_IN, e.g. 0x81)
+ *   ACK_HDR_LEN = 3:
+ *   Byte 0    : echoed header
+ *   Byte 1    : echoed mbox
+ *   Byte 2    : echoed cmd
+ *   Bytes 3+  : response data (for reads; data starts at offset 3)
  *
  * ─── REGISTER MAP ────────────────────────────────────────────────────────────
  * All addresses are in the IT913x/IT9303 internal register space.
@@ -87,39 +85,11 @@ class IteCommandTransport(
         const val REG_TS_OUTPUT_EN    = 0x00d1b8
 
         /**
-         * Frequency registers — 32-bit center frequency split across 4 bytes.
-         * The IT913x/IT9303 stores the frequency in Hz (big-endian).
-         * Example: 473 MHz → 473_000_000 Hz → 0x1C28_BE00
-         *   REG_FREQ_B3 ← 0x1C   (bits [31:24])
-         *   REG_FREQ_B2 ← 0x28   (bits [23:16])
-         *   REG_FREQ_B1 ← 0xBE   (bits [15:8])
-         *   REG_FREQ_B0 ← 0x00   (bits [7:0])
-         */
-        const val REG_FREQ_B3         = 0x00d144  // MSB
-        const val REG_FREQ_B2         = 0x00d145
-        const val REG_FREQ_B1         = 0x00d146
-        const val REG_FREQ_B0         = 0x00d147  // LSB
-
-        /**
-         * Bandwidth register.
-         * 0x01 = 6 MHz (ATSC, used in US/Canada)
-         * 0x02 = 7 MHz (DVB-T in some regions)
-         * 0x03 = 8 MHz (DVB-T in most of Europe)
-         */
-        const val REG_BANDWIDTH       = 0x00d140
-        const val BW_6MHZ             = 0x01
-
-        /**
-         * Retune trigger.
-         * Writing 0x01 here starts the frequency change / lock sequence.
-         * The demod sets REG_LOCK_STATUS bit 3 when locked.
-         */
-        const val REG_RETUNE_TRIGGER  = 0x00d160
-
-        /**
-         * I2C address of the IT9135/IT9137 RF tuner sitting on the
-         * demodulator's internal I2C bus. Used when the tuner is a
-         * discrete chip (not integrated) — change if your variant differs.
+         * I2C address of the IT9135 RF tuner on the demodulator's internal
+         * I2C bus. Frequency programming via this address requires the
+         * proprietary ITE tuner driver (it913x.c) which is not in the
+         * mainline Linux kernel. USB traffic capture is needed to reverse-
+         * engineer the PLL programming sequence.
          */
         const val TUNER_I2C_ADDR      = 0x38
     }
@@ -132,15 +102,16 @@ class IteCommandTransport(
 
     /** Read one byte from an internal register. Returns null on USB error. */
     suspend fun readReg(addr: Int): Int? = withContext(Dispatchers.IO) {
-        val pkt = buildPacket(CMD_MEM_RD, addr, addrLen = 3, dataLen = 1)
+        val pkt = buildPacket(CMD_MEM_RD, addr, dataLen = 1)
         if (sendBulk(pkt) < 0) return@withContext null
-        val resp = recvBulk(5) ?: return@withContext null
-        resp[4].toInt() and 0xFF
+        // ACK_HDR_LEN = 3: response data starts at index 3
+        val resp = recvBulk(4) ?: return@withContext null
+        resp[3].toInt() and 0xFF
     }
 
     /** Write one byte to an internal register. Returns true on success. */
     suspend fun writeReg(addr: Int, value: Int): Boolean = withContext(Dispatchers.IO) {
-        val pkt = buildPacket(CMD_MEM_WR, addr, addrLen = 3, dataLen = 1,
+        val pkt = buildPacket(CMD_MEM_WR, addr, dataLen = 1,
             data = byteArrayOf(value.toByte()))
         sendBulk(pkt) >= 0
     }
@@ -157,29 +128,34 @@ class IteCommandTransport(
     /**
      * Tune the demodulator to [freqKhz] kHz center frequency (ATSC 6 MHz).
      *
-     * Sequence:
-     *  1. Gate off TS output to avoid partial packets during retune.
-     *  2. Write 32-bit frequency (in Hz) to the four frequency registers.
-     *  3. Set bandwidth = 6 MHz.
-     *  4. Trigger the retune sequence.
-     *  5. TS output re-enabled by caller after lock is confirmed.
+     * Applies the AF9033 retune sequence (bandwidth + FSM reset) so the
+     * demodulator can acquire a new carrier. RF tuner frequency programming
+     * (IT9135) still requires the proprietary ITE tuner driver; once USB
+     * traffic can be captured we can add those I2C writes here.
+     *
+     * Sequence (from Linux af9033.c set_frontend):
+     *  1. Pause TS output.
+     *  2. Set 6 MHz ATSC bandwidth (reg 0x80f904).
+     *  3. Clear demod status registers.
+     *  4. Select VHF / UHF band (reg 0x80004b).
+     *  5. Reset FSM to begin acquisition (reg 0x800000).
      */
     suspend fun setFrequency(freqKhz: Int): Boolean {
-        val freqHz = freqKhz.toLong() * 1_000L
-        Log.d(TAG, "setFrequency: ${freqKhz} kHz (0x${freqHz.toString(16)})")
+        Log.d(TAG, "setFrequency: $freqKhz kHz")
 
         // Pause TS stream while retuning
         writeReg(REG_TS_OUTPUT_EN, 0x00)
 
-        // Write 32-bit frequency in Hz (big-endian across 4 consecutive regs)
-        val ok = writeReg(REG_FREQ_B3, ((freqHz shr 24) and 0xFF).toInt()) &&
-                 writeReg(REG_FREQ_B2, ((freqHz shr 16) and 0xFF).toInt()) &&
-                 writeReg(REG_FREQ_B1, ((freqHz shr 8)  and 0xFF).toInt()) &&
-                 writeReg(REG_FREQ_B0, (freqHz and 0xFF).toInt()) &&
-                 writeReg(REG_BANDWIDTH, BW_6MHZ) &&
-                 writeReg(REG_RETUNE_TRIGGER, 0x01)  // fire!
+        // AF9033 / IT9135 demod-side retune sequence
+        writeReg(0x80f904, 0x00)   // bandwidth bits[1:0] = 0x00 → 6 MHz (ATSC)
+        writeReg(0x800040, 0x00)   // clear status
+        writeReg(0x800047, 0x00)   // clear channel status
+        writeReg(0x80f999, 0x00)   // clear lock flags
+        val band = if (freqKhz <= 230_000) 0x00 else 0x01  // 0=VHF, 1=UHF
+        writeReg(0x80004b, band)
+        val ok = writeReg(0x800000, 0x00)  // reset FSM → triggers acquisition
 
-        if (!ok) Log.e(TAG, "setFrequency: one or more register writes failed")
+        if (!ok) Log.e(TAG, "setFrequency: AF9033 FSM reset write failed")
         return ok
     }
 
@@ -222,42 +198,71 @@ class IteCommandTransport(
     /**
      * Construct an AF9035-style bulk command packet.
      *
-     * @param cmd      command ID (CMD_MEM_RD, CMD_MEM_WR, …)
-     * @param addr     32-bit register address
-     * @param addrLen  number of significant address bytes (3 for most registers)
-     * @param dataLen  number of data bytes (to write, or expected to read)
-     * @param data     payload bytes for write commands; unused for reads
-     * @param mbox     mailbox select; 0x00 = host interface (default)
+     * Packet layout (from Linux af9035.c af9035_ctrl_msg):
+     *   buf[0]   = REQ_HDR_LEN(4) + wlen + CHECKSUM_LEN(2) - 1
+     *   buf[1]   = mbox = (addr >> 16) & 0xFF
+     *   buf[2]   = cmd
+     *   buf[3]   = seqNum++
+     *   buf[4]   = dataLen  (wbuf[0]: bytes to read/write)
+     *   buf[5]   = 0x02     (wbuf[1]: register access type)
+     *   buf[6]   = 0x00     (wbuf[2]: padding)
+     *   buf[7]   = 0x00     (wbuf[3]: padding)
+     *   buf[8]   = (addr >> 8) & 0xFF  (wbuf[4]: address high byte)
+     *   buf[9]   = addr & 0xFF          (wbuf[5]: address low byte)
+     *   buf[10+] = data bytes (for writes; absent for reads)
+     *   buf[n-1] = checksum high byte
+     *   buf[n]   = checksum low byte
+     *
+     * Checksum: 16-bit bitwise NOT of alternating big-endian byte sum over
+     *           buf[1..buf[0]-2], per af9035_checksum() in the Linux driver.
+     *
+     * @param cmd     command ID (CMD_MEM_RD, CMD_MEM_WR, …)
+     * @param addr    24-bit register address; bits [23:16] become the mbox byte
+     * @param dataLen bytes expected back (reads) or bytes to write (writes)
+     * @param data    payload for write commands; empty for reads
      */
     private fun buildPacket(
         cmd: Int,
         addr: Int,
-        addrLen: Int = 3,
         dataLen: Int = 0,
         data: ByteArray = ByteArray(0),
-        mbox: Int = 0x00,
     ): ByteArray {
-        // payload_len covers everything AFTER the length byte, up to last data byte
-        val payloadLen = 9 + data.size  // mbox+cmd+seq+addr(4)+addrLen+dataLen+data
-        val totalLen = payloadLen + 2   // +1 for the length byte itself, +1 for checksum
-        val buf = ByteArray(totalLen)
+        // Split the 24-bit address: mbox = bits[23:16], 16-bit reg in wbuf
+        val mbox  = (addr shr 16) and 0xFF
+        val regHi = (addr shr 8)  and 0xFF
+        val regLo = addr and 0xFF
 
-        buf[0] = payloadLen.toByte()
+        // wbuf occupies 6 fixed bytes plus any write data
+        val wlen = 6 + data.size
+        // buf[0] = REQ_HDR_LEN(4) + wlen + CHECKSUM_LEN(2) - 1
+        val headerByte = wlen + 5
+        // Total packet = REQ_HDR_LEN(4) + wlen + CHECKSUM_LEN(2)
+        val pktLen = wlen + 6
+        val buf = ByteArray(pktLen)
+
+        buf[0] = headerByte.toByte()
         buf[1] = mbox.toByte()
         buf[2] = cmd.toByte()
         buf[3] = (seqNum++ and 0xFF).toByte()
-        buf[4] = ((addr shr 24) and 0xFF).toByte()
-        buf[5] = ((addr shr 16) and 0xFF).toByte()
-        buf[6] = ((addr shr 8)  and 0xFF).toByte()
-        buf[7] = (addr and 0xFF).toByte()
-        buf[8] = addrLen.toByte()
-        buf[9] = dataLen.toByte()
+        buf[4] = dataLen.toByte()     // wbuf[0]: bytes to read/write
+        buf[5] = 0x02                 // wbuf[1]: register access type
+        buf[6] = 0x00                 // wbuf[2]: padding
+        buf[7] = 0x00                 // wbuf[3]: padding
+        buf[8] = regHi.toByte()       // wbuf[4]: address bits[15:8]
+        buf[9] = regLo.toByte()       // wbuf[5]: address bits[7:0]
         for (i in data.indices) buf[10 + i] = data[i]
 
-        // 2's-complement checksum: sum of buf[0..payloadLen], then negate
-        var sum = 0
-        for (i in 0..payloadLen) sum += buf[i].toInt() and 0xFF
-        buf[payloadLen + 1] = ((-sum) and 0xFF).toByte()
+        // 16-bit checksum: ~(alternating big-endian sum of buf[1..buf[0]-2])
+        // Place result at buf[pktLen-2] (hi) and buf[pktLen-1] (lo)
+        val checksumStart = pktLen - 2
+        var checksum = 0
+        for (i in 1 until checksumStart) {
+            val b = buf[i].toInt() and 0xFF
+            checksum += if (i % 2 == 1) b shl 8 else b
+        }
+        checksum = checksum.inv() and 0xFFFF
+        buf[checksumStart]     = (checksum shr 8).toByte()
+        buf[checksumStart + 1] = (checksum and 0xFF).toByte()
 
         return buf
     }

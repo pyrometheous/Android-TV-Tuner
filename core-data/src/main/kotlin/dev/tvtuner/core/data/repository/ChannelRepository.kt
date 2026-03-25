@@ -22,6 +22,9 @@ class ChannelRepository @Inject constructor(
 
     suspend fun getById(id: Long): ChannelEntity? = channelDao.getById(id)
 
+    suspend fun findByMajorMinor(major: Int, minor: Int): ChannelEntity? =
+        channelDao.findByMajorMinor(major, minor)
+
     suspend fun replaceAll(channels: List<ChannelEntity>) {
         channelDao.deleteAll()
         channelDao.insertAll(channels)

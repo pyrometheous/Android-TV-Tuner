@@ -75,6 +75,21 @@ class LiveTvViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Parse a channel input string like "6.4" or "12.1" and tune to that
+     * virtual channel if it exists in the database. Major-only input (e.g.
+     * "7") tunes to the first sub-channel of that major (e.g. 7.1).
+     */
+    fun tuneToChannelInput(input: String) {
+        val parts = input.trim().split(".")
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: return
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 1
+        viewModelScope.launch {
+            val channel = channelRepository.findByMajorMinor(major, minor) ?: return@launch
+            tuneToChannel(channel)
+        }
+    }
+
     fun showOverlay() { _overlayVisible.value = true }
     fun hideOverlay() { _overlayVisible.value = false }
     fun toggleOverlay() { _overlayVisible.value = !_overlayVisible.value }

@@ -27,6 +27,9 @@ interface ChannelDao {
     @Query("SELECT * FROM channels WHERE rf_channel_khz = :rfKhz AND program_number = :programNumber LIMIT 1")
     suspend fun findByRfAndProgram(rfKhz: Int, programNumber: Int): ChannelEntity?
 
+    @Query("SELECT * FROM channels WHERE major_channel = :major AND minor_channel = :minor AND is_hidden = 0 LIMIT 1")
+    suspend fun findByMajorMinor(major: Int, minor: Int): ChannelEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(channels: List<ChannelEntity>)
 

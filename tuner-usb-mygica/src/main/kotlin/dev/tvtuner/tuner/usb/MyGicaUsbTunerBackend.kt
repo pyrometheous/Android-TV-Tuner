@@ -363,7 +363,7 @@ class MyGicaUsbTunerBackend @Inject constructor(
             if (!currentCoroutineContext().isActive) break
 
             val freqKhz = rfCh.centerFreqKhz
-            emit(ScanEvent.Progress(freqKhz, (index * 100) / total))
+            emit(ScanEvent.Progress(freqKhz, (index * 100) / total, rfCh.rfChannel))
             Log.d(TAG, "scan: ch ${rfCh.rfChannel} @ $freqKhz kHz")
 
             // Write frequency to demodulator registers

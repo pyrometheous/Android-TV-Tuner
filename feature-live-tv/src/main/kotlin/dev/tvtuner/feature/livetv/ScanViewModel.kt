@@ -38,7 +38,7 @@ class ScanViewModel @Inject constructor(
             return
         }
 
-        _uiState.value = ScanUiState.Scanning(progress = 0, channelsFound = 0, currentFreqKhz = 0)
+        _uiState.value = ScanUiState.Scanning(progress = 0, channelsFound = 0, currentRfChannel = 0)
         foundChannels.clear()
 
         viewModelScope.launch {
@@ -53,7 +53,7 @@ class ScanViewModel @Inject constructor(
                             if (current is ScanUiState.Scanning) {
                                 _uiState.value = current.copy(
                                     progress = event.percentComplete,
-                                    currentFreqKhz = event.rfChannelKhz,
+                                    currentRfChannel = event.rfChannelNumber,
                                 )
                             }
                         }
@@ -104,7 +104,8 @@ sealed class ScanUiState {
     data class Scanning(
         val progress: Int,
         val channelsFound: Int,
-        val currentFreqKhz: Int,
+        /** The RF channel number currently being scanned (e.g. 14 for UHF ch 14). */
+        val currentRfChannel: Int,
     ) : ScanUiState()
     data class Complete(val totalFound: Int) : ScanUiState()
     data class Error(val message: String) : ScanUiState()
