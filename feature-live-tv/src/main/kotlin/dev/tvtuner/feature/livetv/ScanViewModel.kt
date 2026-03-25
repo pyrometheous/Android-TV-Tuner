@@ -7,6 +7,8 @@ import dev.tvtuner.core.data.db.entity.ChannelEntity
 import dev.tvtuner.core.data.repository.ChannelRepository
 import dev.tvtuner.tuner.core.ScanEvent
 import dev.tvtuner.tuner.core.ScanMode
+import dev.tvtuner.tuner.core.TunerBackendType
+import dev.tvtuner.tuner.core.TunerError
 import dev.tvtuner.tuner.core.TunerManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +31,16 @@ class ScanViewModel @Inject constructor(
 
     fun startScan(mode: ScanMode = ScanMode.FULL) {
         if (_uiState.value is ScanUiState.Scanning) return
+
+        val backendName = tunerManager.getActiveBackend()?.backendName
+        if (backendName == TunerBackendType.USB_MYGICA.name) {
+            _uiState.value = ScanUiState.Error(
+                "MyGica USB channel scan is not implemented in this build yet. " +
+                    "Use an HDHomeRun network tuner for scanning, or import channels once USB protocol support lands."
+            )
+            return
+        }
+
         _uiState.value = ScanUiState.Scanning(progress = 0, channelsFound = 0, currentFreqKhz = 0)
         foundChannels.clear()
 
@@ -60,7 +72,7 @@ class ScanViewModel @Inject constructor(
                             _uiState.value = ScanUiState.Complete(foundChannels.size)
                         }
                         is ScanEvent.Error -> {
-                            _uiState.value = ScanUiState.Error(event.error.message)
+                            _uiState.value = ScanUiState.Error(event.error.userFacingMessage())
                         }
                         is ScanEvent.SignalStrength -> { /* informational */ }
                     }
@@ -82,6 +94,12 @@ class ScanViewModel @Inject constructor(
         }
         channelRepository.replaceAll(entities)
     }
+}
+
+private fun TunerError.userFacingMessage(): String = when (this) {
+    is TunerError.NotImplemented ->
+        "The selected tuner backend is not fully implemented yet. Switch to HDHomeRun network tuner for channel scanning."
+    else -> message
 }
 
 sealed class ScanUiState {
